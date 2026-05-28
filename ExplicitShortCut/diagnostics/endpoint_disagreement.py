@@ -3,6 +3,7 @@ import csv
 import json
 import math
 import os
+import random
 import sys
 from pathlib import Path
 
@@ -45,6 +46,8 @@ class RecursiveImageDataset(Dataset):
         max_images=None,
         label_map=None,
         list_max_images=False,
+        shuffle=False,
+        seed=0,
     ):
         self.root = Path(root)
         self.label_map = label_map
@@ -56,6 +59,9 @@ class RecursiveImageDataset(Dataset):
                 if list_max_images and max_images is not None and len(paths) >= max_images:
                     break
         self.paths = sorted(paths)
+        if shuffle:
+            rng = random.Random(seed)
+            rng.shuffle(self.paths)
         if max_images is not None and not list_max_images:
             self.paths = self.paths[:max_images]
         if not self.paths:
@@ -158,6 +164,9 @@ def load_label_map(args):
 def main(args):
     device = torch.device(args.device if args.device else "cuda")
     print(f"[info] Using device: {device}")
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    random.seed(args.seed)
     if device.type == "cuda":
         torch.backends.cuda.matmul.allow_tf32 = True
 
@@ -176,6 +185,8 @@ def main(args):
         args.max_images,
         label_map=label_map,
         list_max_images=args.list_max_images,
+        shuffle=args.shuffle,
+        seed=args.seed,
     )
     print(f"[info] Found {len(dataset)} images for diagnosis")
     dataloader = DataLoader(
@@ -297,6 +308,8 @@ def main(args):
         "r_fractions": r_fractions,
         "data_endpoint_time": 0.0,
         "latent_scale": 0.18125,
+        "seed": args.seed,
+        "shuffle": args.shuffle,
         "by_t": {},
         "outputs": {
             "sample_csv": str(csv_path),
@@ -339,6 +352,8 @@ if __name__ == "__main__":
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--max-images", type=int, default=1024)
     parser.add_argument("--list-max-images", action="store_true")
+    parser.add_argument("--shuffle", action="store_true")
+    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--t-values", type=str, default="0.25,0.5,0.75,0.9")
     parser.add_argument("--r-fractions", type=str, default="0,0.25,0.5,0.75,1.0")
     parser.add_argument("--label-mode", type=str, default="null", choices=["null", "random", "json"])
