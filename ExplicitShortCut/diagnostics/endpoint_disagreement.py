@@ -135,6 +135,13 @@ def load_vae(device):
     return vae
 
 
+def encode_latents(vae, images):
+    if hasattr(vae, "_encode"):
+        posterior = DiagonalGaussianDistribution(vae._encode(images))
+        return posterior.sample()
+    return vae.encode(images).latent_dist.sample()
+
+
 def load_label_map(args):
     if args.label_mode != "json":
         return None
@@ -206,8 +213,7 @@ def main(args):
     pbar = tqdm(dataloader, desc="Endpoint disagreement")
     for images, rel_paths, labels in pbar:
         images = images.to(device, non_blocking=True)
-        posterior = DiagonalGaussianDistribution(vae._encode(images))
-        x_data = posterior.sample()
+        x_data = encode_latents(vae, images)
         x_data = x_data * latents_scale + latents_bias
 
         noise = torch.randn_like(x_data)
