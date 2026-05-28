@@ -1,0 +1,15 @@
+# Keep diagnostic scripts versioned, but never commit generated runs.
+*/
+*.csv
+*.json
+*.jsonl
+*.pt
+*.pth
+*.npy
+*.npz
+*.png
+__pycache__/
+
+!.gitignore
+!*.py
+!README.md
