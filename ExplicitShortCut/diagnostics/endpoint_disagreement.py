@@ -33,16 +33,25 @@ def center_crop_arr(pil_image, image_size):
 
 
 class RecursiveImageDataset(Dataset):
-    def __init__(self, root, image_size=256, max_images=None, label_map=None):
+    def __init__(
+        self,
+        root,
+        image_size=256,
+        max_images=None,
+        label_map=None,
+        list_max_images=False,
+    ):
         self.root = Path(root)
         self.label_map = label_map
         suffixes = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
-        paths = [
-            p for p in self.root.rglob("*")
-            if p.is_file() and p.suffix.lower() in suffixes
-        ]
+        paths = []
+        for p in self.root.rglob("*"):
+            if p.is_file() and p.suffix.lower() in suffixes:
+                paths.append(p)
+                if list_max_images and max_images is not None and len(paths) >= max_images:
+                    break
         self.paths = sorted(paths)
-        if max_images is not None:
+        if max_images is not None and not list_max_images:
             self.paths = self.paths[:max_images]
         if not self.paths:
             raise FileNotFoundError(f"No images found under {self.root}")
@@ -93,6 +102,7 @@ def load_sit_model(args, device):
     else:
         from arch.sit import SiT_models
 
+    print(f"[info] Building model {args.model} (adapt_model={args.adapt_model})")
     model = SiT_models[args.model](
         input_size=latent_size,
         num_classes=args.num_classes,
@@ -100,6 +110,7 @@ def load_sit_model(args, device):
         **block_kwargs,
     ).to(device)
 
+    print(f"[info] Loading checkpoint: {args.ckpt}")
     checkpoint = torch.load(args.ckpt, map_location="cpu", weights_only=False)
     state_dict = checkpoint[args.ckpt_key]
     model.load_state_dict(state_dict)
@@ -110,8 +121,10 @@ def load_sit_model(args, device):
 def load_vae(device):
     local_path = "./ckpt/stabilityai/sd-vae-ft-ema"
     if os.path.exists(local_path):
+        print(f"[info] Loading local VAE: {local_path}")
         vae = AutoencoderKL.from_pretrained(local_path).to(device)
     else:
+        print("[info] Loading VAE from Hugging Face: stabilityai/sd-vae-ft-ema")
         vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema").to(device)
     vae.eval()
     return vae
@@ -122,6 +135,7 @@ def load_label_map(args):
         return None
 
     label_json = Path(args.label_json) if args.label_json else Path(args.image_root) / "dataset.json"
+    print(f"[info] Loading label json: {label_json}")
     with label_json.open("r", encoding="utf-8") as f:
         payload = json.load(f)
     label_map = dict(payload["labels"])
@@ -131,6 +145,7 @@ def load_label_map(args):
 @torch.no_grad()
 def main(args):
     device = torch.device(args.device if args.device else "cuda")
+    print(f"[info] Using device: {device}")
     if device.type == "cuda":
         torch.backends.cuda.matmul.allow_tf32 = True
 
@@ -142,12 +157,15 @@ def main(args):
         raise ValueError("--r-fractions must be in [0, 1].")
 
     label_map = load_label_map(args)
+    print(f"[info] Scanning images under: {args.image_root}")
     dataset = RecursiveImageDataset(
         args.image_root,
         args.resolution,
         args.max_images,
         label_map=label_map,
+        list_max_images=args.list_max_images,
     )
+    print(f"[info] Found {len(dataset)} images for diagnosis")
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -162,6 +180,7 @@ def main(args):
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[info] Output dir: {output_dir}")
     csv_path = output_dir / "endpoint_disagreement_samples.csv"
     json_path = output_dir / "endpoint_disagreement_summary.json"
 
@@ -308,6 +327,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--max-images", type=int, default=1024)
+    parser.add_argument("--list-max-images", action="store_true")
     parser.add_argument("--t-values", type=str, default="0.25,0.5,0.75,0.9")
     parser.add_argument("--r-fractions", type=str, default="0,0.25,0.5,0.75,1.0")
     parser.add_argument("--label-mode", type=str, default="null", choices=["null", "random", "json"])
