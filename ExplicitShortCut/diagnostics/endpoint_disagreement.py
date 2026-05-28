@@ -52,12 +52,18 @@ class RecursiveImageDataset(Dataset):
         self.root = Path(root)
         self.label_map = label_map
         suffixes = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
-        paths = []
-        for p in self.root.rglob("*"):
-            if p.is_file() and p.suffix.lower() in suffixes:
-                paths.append(p)
-                if list_max_images and max_images is not None and len(paths) >= max_images:
-                    break
+        if label_map is not None:
+            paths = [
+                self.root / rel_path for rel_path in label_map.keys()
+                if Path(rel_path).suffix.lower() in suffixes
+            ]
+        else:
+            paths = []
+            for p in self.root.rglob("*"):
+                if p.is_file() and p.suffix.lower() in suffixes:
+                    paths.append(p)
+                    if list_max_images and max_images is not None and len(paths) >= max_images:
+                        break
         self.paths = sorted(paths)
         if shuffle:
             rng = random.Random(seed)
