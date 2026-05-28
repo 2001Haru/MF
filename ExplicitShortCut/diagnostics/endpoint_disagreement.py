@@ -33,8 +33,9 @@ def center_crop_arr(pil_image, image_size):
 
 
 class RecursiveImageDataset(Dataset):
-    def __init__(self, root, image_size=256, max_images=None):
+    def __init__(self, root, image_size=256, max_images=None, label_map=None):
         self.root = Path(root)
+        self.label_map = label_map
         suffixes = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
         paths = [
             p for p in self.root.rglob("*")
@@ -59,8 +60,9 @@ class RecursiveImageDataset(Dataset):
         path = self.paths[idx]
         image = Image.open(path).convert("RGB")
         image = self.transform(image)
-        rel_path = str(path.relative_to(self.root))
-        return image, rel_path
+        rel_path = path.relative_to(self.root).as_posix()
+        label = -1 if self.label_map is None else int(self.label_map[rel_path])
+        return image, rel_path, label
 
 
 def parse_float_list(value):
@@ -115,6 +117,17 @@ def load_vae(device):
     return vae
 
 
+def load_label_map(args):
+    if args.label_mode != "json":
+        return None
+
+    label_json = Path(args.label_json) if args.label_json else Path(args.image_root) / "dataset.json"
+    with label_json.open("r", encoding="utf-8") as f:
+        payload = json.load(f)
+    label_map = dict(payload["labels"])
+    return {str(k).replace("\\", "/"): int(v) for k, v in label_map.items()}
+
+
 @torch.no_grad()
 def main(args):
     device = torch.device(args.device if args.device else "cuda")
@@ -128,7 +141,13 @@ def main(args):
     if any(r < 0 or r > 1 for r in r_fractions):
         raise ValueError("--r-fractions must be in [0, 1].")
 
-    dataset = RecursiveImageDataset(args.image_root, args.resolution, args.max_images)
+    label_map = load_label_map(args)
+    dataset = RecursiveImageDataset(
+        args.image_root,
+        args.resolution,
+        args.max_images,
+        label_map=label_map,
+    )
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -161,7 +180,7 @@ def main(args):
     null_y_value = args.num_classes
 
     pbar = tqdm(dataloader, desc="Endpoint disagreement")
-    for images, rel_paths in pbar:
+    for images, rel_paths, labels in pbar:
         images = images.to(device, non_blocking=True)
         posterior = DiagonalGaussianDistribution(vae._encode(images))
         x_data = posterior.sample()
@@ -174,6 +193,8 @@ def main(args):
             y = torch.full((batch_size,), null_y_value, device=device, dtype=torch.long)
         elif args.label_mode == "random":
             y = torch.randint(0, args.num_classes, (batch_size,), device=device)
+        elif args.label_mode == "json":
+            y = labels.to(device, non_blocking=True).long()
         else:
             raise ValueError(f"Unsupported label mode: {args.label_mode}")
 
@@ -240,6 +261,7 @@ def main(args):
         "adapt_model": args.adapt_model,
         "resolution": args.resolution,
         "label_mode": args.label_mode,
+        "label_json": args.label_json,
         "num_classes": args.num_classes,
         "t_values": t_values,
         "r_fractions": r_fractions,
@@ -288,7 +310,8 @@ if __name__ == "__main__":
     parser.add_argument("--max-images", type=int, default=1024)
     parser.add_argument("--t-values", type=str, default="0.25,0.5,0.75,0.9")
     parser.add_argument("--r-fractions", type=str, default="0,0.25,0.5,0.75,1.0")
-    parser.add_argument("--label-mode", type=str, default="null", choices=["null", "random"])
+    parser.add_argument("--label-mode", type=str, default="null", choices=["null", "random", "json"])
+    parser.add_argument("--label-json", type=str, default=None)
     parser.add_argument("--device", type=str, default=None)
     args = parser.parse_args()
     main(args)
