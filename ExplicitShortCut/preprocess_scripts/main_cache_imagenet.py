@@ -1,6 +1,7 @@
 # type: ignore
 import argparse
 import datetime
+import json
 import numpy as np
 import os
 import time
@@ -20,6 +21,18 @@ from diffusers.models import AutoencoderKL
 from diffusers.models.autoencoders.vae import DiagonalGaussianDistribution
 
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+
+
+def init_distributed():
+    if "RANK" not in os.environ or "WORLD_SIZE" not in os.environ:
+        return 0, 0, 1
+
+    rank = int(os.environ["RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    if not dist.is_initialized():
+        dist.init_process_group(backend="nccl")
+    return local_rank, rank, world_size
 
 def center_crop_arr(pil_image, image_size):
 
@@ -72,14 +85,49 @@ class ImageFolderDataset(ImageFolder):
         
         return sample, label, filename, index
 
+
+class JsonLabelImageDataset(torch.utils.data.Dataset):
+    def __init__(self, folder_dir, label_json, transform=None):
+        self.root = folder_dir
+        self.transform = transform
+
+        with open(label_json, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+        records = metadata["labels"]
+
+        self.samples = []
+        for rel_path, label in records:
+            abs_path = os.path.join(self.root, rel_path)
+            if os.path.isfile(abs_path):
+                self.samples.append((rel_path, int(label)))
+
+        if len(self.samples) == 0:
+            raise RuntimeError(f"No images from {label_json} were found under {folder_dir}")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, index):
+        filename, label = self.samples[index]
+        path = os.path.join(self.root, filename)
+        sample = Image.open(path).convert("RGB")
+        if self.transform is not None:
+            sample = self.transform(sample)
+        return sample, label, filename, index
+
+
+def encode_moments(vae, images):
+    if hasattr(vae, "_encode"):
+        return DiagonalGaussianDistribution(vae._encode(images)).parameters
+    return vae.encode(images).latent_dist.parameters
+
+
 def process_batch(args, vae, device, images, labels, filenames, original_indices, env):
     images = images.to(device)
     
     with torch.no_grad():
-        posterior = DiagonalGaussianDistribution(vae._encode(images))
-        moments = posterior.parameters
-        posterior_flip = DiagonalGaussianDistribution(vae._encode(images.flip(dims=[3])))
-        moments_flip = posterior_flip.parameters
+        moments = encode_moments(vae, images)
+        moments_flip = encode_moments(vae, images.flip(dims=[3]))
     
     try:
         with env.begin(write=True) as txn:
@@ -100,21 +148,22 @@ def process_batch(args, vae, device, images, labels, filenames, original_indices
 
 def preprocess_latents(args):
 
-    local_rank = 0
-    rank = 0
-    world_size = 1
+    local_rank, rank, world_size = init_distributed()
 
     device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)
     torch.manual_seed(args.seed + rank)
     np.random.seed(args.seed + rank)
     cudnn.benchmark = True
-    local_path = './ckpt/stabilityai/sd-vae-ft-ema'
-    if not os.path.exists(local_path):
-        vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-ema").to(device)
+    if args.local_vae_path and os.path.exists(args.local_vae_path):
+        if rank == 0:
+            print(f"Loading local VAE from {args.local_vae_path}")
+        vae = AutoencoderKL.from_pretrained(args.local_vae_path).to(device)
     else:
-        vae = AutoencoderKL.from_pretrained(local_path).to(device)
-    vae.eval()
+        if rank == 0:
+            print(f"Loading VAE from Hugging Face: {args.vae_name}")
+        vae = AutoencoderKL.from_pretrained(args.vae_name).to(device)
+    vae.eval().requires_grad_(False)
     
     transform = transforms.Compose([
         transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, args.img_size)),
@@ -124,7 +173,12 @@ def preprocess_latents(args):
     
     if rank == 0:
         print(f"Loading source dataset from {args.folder_dir}")
-    dataset = ImageFolderDataset(args.folder_dir, transform=transform)
+    if args.label_json:
+        if rank == 0:
+            print(f"Using labels from {args.label_json}")
+        dataset = JsonLabelImageDataset(args.folder_dir, args.label_json, transform=transform)
+    else:
+        dataset = ImageFolderDataset(args.folder_dir, transform=transform)
     
     sampler = torch.utils.data.distributed.DistributedSampler(
         dataset, 
@@ -173,12 +227,16 @@ def preprocess_latents(args):
         
         
         if rank == 0:
+            if dist.is_initialized():
+                dist.barrier()
             try:
                 with env.begin(write=True) as txn:
                     txn.put('num_samples'.encode(), str(len(dataset)).encode())
                     txn.put('created_at'.encode(), str(datetime.datetime.now()).encode())
             except lmdb.Error as e:
                 print(f"Error writing metadata: {e}")
+        elif dist.is_initialized():
+            dist.barrier()
         
         
         total_time = time.time() - start_time
@@ -207,12 +265,21 @@ def preprocess_latents(args):
             except Exception as e:
                 print(f"Process {rank} error closing LMDB: {e}")
 
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Preprocess ImageNet to VAE latents')
     parser.add_argument('--folder_dir', type=str, default='./image_data/ImageNet/train',
                         help='Path to source ImageNet folder')
     parser.add_argument('--target_lmdb', type=str, default='./image_data/imagenet_vq_lmdb/train',
                         help='Path to save target latents LMDB')
+    parser.add_argument('--label_json', type=str, default='',
+                        help='Optional dataset.json with labels in [[relative_path, label], ...] format')
+    parser.add_argument('--vae_name', type=str, default='stabilityai/sd-vae-ft-ema',
+                        help='Hugging Face VAE name. Use stabilityai/sd-vae-ft-ema for ESC.')
+    parser.add_argument('--local_vae_path', type=str, default='./ckpt/stabilityai/sd-vae-ft-ema',
+                        help='Local VAE directory. Used before downloading from Hugging Face.')
     parser.add_argument('--img_size', type=int, default=256,
                         help='Image size for preprocessing')
     parser.add_argument('--batch_size', type=int, default=256,
