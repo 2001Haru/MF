@@ -99,6 +99,10 @@ def parse_triples(value):
     return triples
 
 
+def parse_float_list(value):
+    return [float(x.strip()) for x in value.split(",") if x.strip()]
+
+
 def summarize(values):
     arr = np.asarray(values, dtype=np.float64)
     if arr.size == 0:
@@ -112,6 +116,30 @@ def summarize(values):
         "min": float(arr.min()),
         "max": float(arr.max()),
     }
+
+
+def rankdata(values):
+    arr = np.asarray(values, dtype=np.float64)
+    order = np.argsort(arr)
+    ranks = np.empty_like(order, dtype=np.float64)
+    ranks[order] = np.arange(arr.size, dtype=np.float64)
+    return ranks
+
+
+def correlations(xs, ys):
+    x = np.asarray(xs, dtype=np.float64)
+    y = np.asarray(ys, dtype=np.float64)
+    mask = np.isfinite(x) & np.isfinite(y)
+    x = x[mask]
+    y = y[mask]
+    if x.size < 2 or x.std() == 0 or y.std() == 0:
+        return {"pearson": None, "spearman": None, "n": int(x.size)}
+
+    pearson = float(np.corrcoef(x, y)[0, 1])
+    xr = rankdata(x)
+    yr = rankdata(y)
+    spearman = float(np.corrcoef(xr, yr)[0, 1])
+    return {"pearson": pearson, "spearman": spearman, "n": int(x.size)}
 
 
 def load_label_map(args):
@@ -188,6 +216,7 @@ def main(args):
     random.seed(args.seed)
 
     triples = parse_triples(args.triples)
+    endpoint_r_fractions = parse_float_list(args.endpoint_r_fractions)
     label_map = load_label_map(args)
 
     print(f"[info] Preparing image list under: {args.image_root}")
@@ -225,6 +254,20 @@ def main(args):
     null_y_value = args.num_classes
     records = []
     semigroup_stats = {f"{t}:{s}:{r}": {"gap": [], "gap_rel": []} for t, s, r in triples}
+    endpoint_disagreement_stats = {str(t): [] for t in sorted({t for t, _, _ in triples})}
+    endpoint_comparison_stats = {
+        f"{t}:{s}:{r}": {"mse_one": [], "mse_two": [], "delta": []}
+        for t, s, r in triples
+    }
+    correlation_pairs = {
+        f"{t}:{s}:{r}": {
+            "endpoint_disagreement": [],
+            "gap": [],
+            "gap_rel": [],
+            "delta": [],
+        }
+        for t, s, r in triples
+    }
     fit_stats = {}
 
     def add_fit(key, values):
@@ -246,6 +289,25 @@ def main(args):
             y = labels.to(device, non_blocking=True).long()
         else:
             raise ValueError(f"Unsupported label mode: {args.label_mode}")
+
+        endpoint_disagreement_by_t = {}
+        for t_value in sorted({t for t, _, _ in triples}):
+            t_diag = make_time(batch_size, t_value, device)
+            x_t_diag = (1.0 - t_value) * x_data + t_value * noise
+            endpoint_preds = []
+            for frac in endpoint_r_fractions:
+                r_value_diag = t_value * frac
+                r_diag = make_time(batch_size, r_value_diag, device)
+                u_diag = model(x_t_diag, r_diag, t_diag, y=y)
+                x0_hat = x_t_diag - t_diag.view(-1, 1, 1, 1) * u_diag
+                endpoint_preds.append(x0_hat)
+            endpoint_preds = torch.stack(endpoint_preds, dim=0)
+            endpoint_mean = endpoint_preds.mean(dim=0)
+            disagreement = ((endpoint_preds - endpoint_mean) ** 2).mean(dim=(0, 2, 3, 4))
+            endpoint_disagreement_by_t[t_value] = disagreement
+            endpoint_disagreement_stats[str(t_value)].extend(
+                disagreement.detach().cpu().tolist()
+            )
 
         for t_value, s_value, r_value in triples:
             t = make_time(batch_size, t_value, device)
@@ -269,6 +331,15 @@ def main(args):
             denom = mse_per_sample(x_r_one, x_t).clamp_min(args.eps)
             gap_rel = gap / denom
 
+            if r_value == 0:
+                mse_one = mse_per_sample(x_r_one, x_data)
+                mse_two = mse_per_sample(x_r_two, x_data)
+                delta = mse_two - mse_one
+            else:
+                mse_one = torch.full_like(gap, float("nan"))
+                mse_two = torch.full_like(gap, float("nan"))
+                delta = torch.full_like(gap, float("nan"))
+
             u_cond_tr = (x_t - x_r_true) / (t_value - r_value)
             u_cond_ts = (x_t - x_s_true) / (t_value - s_value)
             u_cond_sr = (x_s_true - x_r_true) / (s_value - r_value)
@@ -283,12 +354,32 @@ def main(args):
             triple_key = f"{t_value}:{s_value}:{r_value}"
             semigroup_stats[triple_key]["gap"].extend(gap.detach().cpu().tolist())
             semigroup_stats[triple_key]["gap_rel"].extend(gap_rel.detach().cpu().tolist())
+            endpoint_comparison_stats[triple_key]["mse_one"].extend(
+                mse_one.detach().cpu().tolist()
+            )
+            endpoint_comparison_stats[triple_key]["mse_two"].extend(
+                mse_two.detach().cpu().tolist()
+            )
+            endpoint_comparison_stats[triple_key]["delta"].extend(
+                delta.detach().cpu().tolist()
+            )
+            d_end = endpoint_disagreement_by_t[t_value]
+            correlation_pairs[triple_key]["endpoint_disagreement"].extend(
+                d_end.detach().cpu().tolist()
+            )
+            correlation_pairs[triple_key]["gap"].extend(gap.detach().cpu().tolist())
+            correlation_pairs[triple_key]["gap_rel"].extend(gap_rel.detach().cpu().tolist())
+            correlation_pairs[triple_key]["delta"].extend(delta.detach().cpu().tolist())
             add_fit(f"{t_value}->{r_value}", fit_tr)
             add_fit(f"{t_value}->{s_value}", fit_ts)
             add_fit(f"{s_value}->{r_value}", fit_sr)
 
+            d_end_cpu = d_end.detach().cpu().tolist()
             gap_cpu = gap.detach().cpu().tolist()
             gap_rel_cpu = gap_rel.detach().cpu().tolist()
+            mse_one_cpu = mse_one.detach().cpu().tolist()
+            mse_two_cpu = mse_two.detach().cpu().tolist()
+            delta_cpu = delta.detach().cpu().tolist()
             fit_tr_cpu = fit_tr.detach().cpu().tolist()
             fit_ts_cpu = fit_ts.detach().cpu().tolist()
             fit_sr_cpu = fit_sr.detach().cpu().tolist()
@@ -300,8 +391,12 @@ def main(args):
                     "t": t_value,
                     "s": s_value,
                     "r": r_value,
+                    "endpoint_disagreement_at_t": d_end_cpu[i],
                     "semigroup_gap": gap_cpu[i],
                     "semigroup_gap_rel": gap_rel_cpu[i],
+                    "endpoint_mse_one": mse_one_cpu[i],
+                    "endpoint_mse_two": mse_two_cpu[i],
+                    "endpoint_mse_delta_two_minus_one": delta_cpu[i],
                     "target_fit_mse_t_to_r": fit_tr_cpu[i],
                     "target_fit_mse_t_to_s": fit_ts_cpu[i],
                     "target_fit_mse_s_to_r": fit_sr_cpu[i],
@@ -328,10 +423,14 @@ def main(args):
         "label_json": args.label_json,
         "num_classes": args.num_classes,
         "triples": [{"t": t, "s": s, "r": r} for t, s, r in triples],
+        "endpoint_r_fractions": endpoint_r_fractions,
         "latent_scale": 0.18125,
         "seed": args.seed,
         "shuffle": args.shuffle,
         "semigroup": {},
+        "endpoint_disagreement": {},
+        "endpoint_comparison": {},
+        "correlation": {},
         "target_fit": {},
         "outputs": {
             "sample_csv": str(sample_csv),
@@ -344,6 +443,29 @@ def main(args):
             "gap": summarize(values["gap"]),
             "gap_rel": summarize(values["gap_rel"]),
         }
+    for key, values in endpoint_disagreement_stats.items():
+        summary["endpoint_disagreement"][key] = summarize(values)
+    for key, values in endpoint_comparison_stats.items():
+        summary["endpoint_comparison"][key] = {
+            "mse_one": summarize(values["mse_one"]),
+            "mse_two": summarize(values["mse_two"]),
+            "delta_two_minus_one": summarize(values["delta"]),
+            "fraction_two_step_better": float(
+                np.mean(np.asarray(values["delta"], dtype=np.float64) < 0)
+            ),
+        }
+    for key, values in correlation_pairs.items():
+        summary["correlation"][key] = {
+            "endpoint_disagreement_vs_gap": correlations(
+                values["endpoint_disagreement"], values["gap"]
+            ),
+            "endpoint_disagreement_vs_gap_rel": correlations(
+                values["endpoint_disagreement"], values["gap_rel"]
+            ),
+            "endpoint_disagreement_vs_delta": correlations(
+                values["endpoint_disagreement"], values["delta"]
+            ),
+        }
     for key, values in sorted(fit_stats.items()):
         summary["target_fit"][key] = summarize(values)
 
@@ -352,6 +474,8 @@ def main(args):
 
     print(json.dumps({
         "semigroup": summary["semigroup"],
+        "endpoint_comparison": summary["endpoint_comparison"],
+        "correlation": summary["correlation"],
         "target_fit": summary["target_fit"],
     }, indent=2))
     print(f"Saved sample records to {sample_csv}")
@@ -380,9 +504,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--triples",
         type=str,
-        default="0.5:0.25:0,0.75:0.5:0.25,0.9:0.75:0.5,0.9:0.5:0",
+        default="0.5:0.25:0,0.75:0.25:0,0.75:0.5:0,0.9:0.25:0,0.9:0.5:0,0.9:0.75:0",
         help="Comma-separated t:s:r triples with 0 <= r < s < t <= 1.",
     )
+    parser.add_argument("--endpoint-r-fractions", type=str, default="0,0.25,0.5,0.75,1.0")
     parser.add_argument("--eps", type=float, default=1e-8)
     parser.add_argument("--device", type=str, default=None)
     main(parser.parse_args())
