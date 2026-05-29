@@ -87,19 +87,24 @@ class ImageFolderDataset(ImageFolder):
 
 
 class JsonLabelImageDataset(torch.utils.data.Dataset):
-    def __init__(self, folder_dir, label_json, transform=None):
+    def __init__(self, folder_dir, label_json, transform=None, max_samples=0, verify_files=False):
         self.root = folder_dir
         self.transform = transform
 
         with open(label_json, "r", encoding="utf-8") as f:
             metadata = json.load(f)
         records = metadata["labels"]
+        if max_samples and max_samples > 0:
+            records = records[:max_samples]
 
         self.samples = []
-        for rel_path, label in records:
-            abs_path = os.path.join(self.root, rel_path)
-            if os.path.isfile(abs_path):
-                self.samples.append((rel_path, int(label)))
+        if verify_files:
+            for rel_path, label in tqdm(records, desc="Verifying image files"):
+                abs_path = os.path.join(self.root, rel_path)
+                if os.path.isfile(abs_path):
+                    self.samples.append((rel_path, int(label)))
+        else:
+            self.samples = [(rel_path, int(label)) for rel_path, label in records]
 
         if len(self.samples) == 0:
             raise RuntimeError(f"No images from {label_json} were found under {folder_dir}")
@@ -176,9 +181,21 @@ def preprocess_latents(args):
     if args.label_json:
         if rank == 0:
             print(f"Using labels from {args.label_json}")
-        dataset = JsonLabelImageDataset(args.folder_dir, args.label_json, transform=transform)
+        dataset = JsonLabelImageDataset(
+            args.folder_dir,
+            args.label_json,
+            transform=transform,
+            max_samples=args.max_samples,
+            verify_files=args.verify_files,
+        )
     else:
         dataset = ImageFolderDataset(args.folder_dir, transform=transform)
+        if args.max_samples and args.max_samples > 0:
+            dataset.samples = dataset.samples[:args.max_samples]
+            dataset.imgs = dataset.samples
+            dataset.targets = dataset.targets[:args.max_samples]
+    if rank == 0:
+        print(f"Prepared dataset with {len(dataset)} samples")
     
     sampler = torch.utils.data.distributed.DistributedSampler(
         dataset, 
@@ -290,6 +307,10 @@ def parse_args():
                         help='Random seed')
     parser.add_argument('--lmdb_size_gb', type=int, default=300,
                         help='LMDB size in GB')
+    parser.add_argument('--max_samples', type=int, default=0,
+                        help='Optional cap for smoke tests. 0 means use all samples.')
+    parser.add_argument('--verify_files', action='store_true',
+                        help='Check that every image path exists before processing. Slow on network filesystems.')
     return parser.parse_args()
 
 if __name__ == '__main__':
