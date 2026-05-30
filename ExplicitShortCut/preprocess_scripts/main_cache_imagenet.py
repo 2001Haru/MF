@@ -127,6 +127,26 @@ def encode_moments(vae, images):
     return vae.encode(images).latent_dist.parameters
 
 
+def find_missing_indices(lmdb_path, num_samples, show_progress=False):
+    if not os.path.exists(lmdb_path):
+        return list(range(num_samples))
+
+    env = lmdb.open(
+        lmdb_path, readonly=True, lock=False, readahead=False, meminit=False
+    )
+    iterator = range(num_samples)
+    if show_progress:
+        iterator = tqdm(iterator, desc="Scanning existing LMDB")
+    try:
+        with env.begin() as txn:
+            return [
+                index for index in iterator
+                if txn.get(f"{index}".encode()) is None
+            ]
+    finally:
+        env.close()
+
+
 def process_batch(args, vae, device, images, labels, filenames, original_indices, env):
     images = images.to(device)
     
@@ -196,6 +216,19 @@ def preprocess_latents(args):
             dataset.targets = dataset.targets[:args.max_samples]
     if rank == 0:
         print(f"Prepared dataset with {len(dataset)} samples")
+    total_num_samples = len(dataset)
+
+    if args.resume:
+        missing_indices = find_missing_indices(
+            args.target_lmdb, total_num_samples, show_progress=(rank == 0)
+        )
+        dataset = torch.utils.data.Subset(dataset, missing_indices)
+        if rank == 0:
+            completed = total_num_samples - len(missing_indices)
+            print(
+                f"Resume enabled: found {completed} completed samples, "
+                f"{len(missing_indices)} samples remaining"
+            )
     
     sampler = torch.utils.data.distributed.DistributedSampler(
         dataset, 
@@ -248,7 +281,7 @@ def preprocess_latents(args):
                 dist.barrier()
             try:
                 with env.begin(write=True) as txn:
-                    txn.put('num_samples'.encode(), str(len(dataset)).encode())
+                    txn.put('num_samples'.encode(), str(total_num_samples).encode())
                     txn.put('created_at'.encode(), str(datetime.datetime.now()).encode())
             except lmdb.Error as e:
                 print(f"Error writing metadata: {e}")
@@ -311,6 +344,8 @@ def parse_args():
                         help='Optional cap for smoke tests. 0 means use all samples.')
     parser.add_argument('--verify_files', action='store_true',
                         help='Check that every image path exists before processing. Slow on network filesystems.')
+    parser.add_argument('--resume', action='store_true',
+                        help='Skip samples already stored in the target LMDB.')
     return parser.parse_args()
 
 if __name__ == '__main__':
