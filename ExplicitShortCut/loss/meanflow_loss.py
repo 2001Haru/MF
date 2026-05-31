@@ -149,15 +149,15 @@ class MeanFlowLoss:
 
         unconditional_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
         model_kwargs = {}
-        if kwargs.get('y') is not None and self.label_dropout_prob > 0:
+        if kwargs.get('y') is not None:
             y = kwargs['y'].clone()  
             batch_size = y.shape[0]
-            num_classes = model_tgt.num_classes
-            dropout_mask = torch.rand(batch_size, device=y.device) < self.label_dropout_prob
-            
-            y[dropout_mask] = num_classes
+            if self.label_dropout_prob > 0:
+                num_classes = model_tgt.num_classes
+                dropout_mask = torch.rand(batch_size, device=y.device) < self.label_dropout_prob
+                y[dropout_mask] = num_classes
+                unconditional_mask = dropout_mask  # Used for unconditional velocity computation
             model_kwargs['y'] = y
-            unconditional_mask = dropout_mask  # Used for unconditional velocity computation
 
         # Sample time steps
         r, s, t = self.sample_time_steps(batch_size, device)

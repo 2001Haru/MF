@@ -225,7 +225,8 @@ def main(args):
     if accelerator.is_main_process:
         logger.info(f"Dataset contains {len(train_dataset):,} images ({args.data_dir})")
     steps_per_epoch = len(train_dataloader) // accelerator.gradient_accumulation_steps
-    args.max_train_steps = args.epochs * steps_per_epoch // accelerator.num_processes
+    if args.max_train_steps is None:
+        args.max_train_steps = args.epochs * steps_per_epoch // accelerator.num_processes
     # Prepare models for training:
     update_ema(ema, model, decay=0)  # Ensure EMA is initialized with synced weights
     update_ema(model_tgt, model, decay=0)
@@ -338,7 +339,7 @@ def main(args):
             if global_step % args.checkpointing_steps == 0 and global_step > 0 or global_step >= args.max_train_steps:
                 if accelerator.is_main_process:
                     checkpoint = {
-                        "model": model.module.state_dict(),
+                        "model": accelerator.unwrap_model(model).state_dict(),
                         "model_tgt": model_tgt.state_dict(),
                         "ema": ema.state_dict(),
                         "opt": optimizer.state_dict(),
@@ -351,7 +352,15 @@ def main(args):
             if (global_step == 1 or (global_step % args.sampling_steps == 0 and global_step > 0)):
                 from sampler import cfg_sampler
                 with torch.no_grad():
-                    samples = cfg_sampler(ema, z_fake, num_steps=1, cfg_scale=1.0, y=y_fake, scheduler=loss_fn.flow_scheduler)
+                    samples = cfg_sampler(
+                        ema,
+                        z_fake,
+                        num_steps=1,
+                        cfg_scale=1.0,
+                        y=y_fake,
+                        scheduler=loss_fn.flow_scheduler,
+                        prediction_type=getattr(loss_fn, "prediction_type", "velocity"),
+                    )
                     samples = vae.decode((samples - latents_bias) / latents_scale).sample
                     samples = (samples + 1) / 2.
                     samples = array2grid(samples.detach().cpu())

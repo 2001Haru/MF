@@ -19,6 +19,7 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 from tqdm import tqdm
+from utils.prediction import predict_endpoint
 
 
 def center_crop_arr(pil_image, image_size):
@@ -123,7 +124,7 @@ def load_sit_model(args, device):
     model = SiT_models[args.model](
         input_size=latent_size,
         num_classes=args.num_classes,
-        use_cfg=True,
+        use_cfg=args.use_cfg,
         **block_kwargs,
     ).to(device)
 
@@ -254,10 +255,9 @@ def main(args):
             for frac in r_fractions:
                 r_value = t_value * frac
                 r = torch.full((batch_size,), r_value, device=device)
-                u = model(x_t, r, t, y=y)
-                # In this repo's linear path, data is at time 0. Therefore
-                # extrapolating from t to the data endpoint uses x_t - t * u.
-                x_hat_data = x_t - t.view(-1, 1, 1, 1) * u
+                x_hat_data = predict_endpoint(
+                    model, x_t, r, t, y=y, prediction_type=args.prediction_type
+                )
                 endpoint_preds.append(x_hat_data)
 
                 err = ((x_hat_data - x_data) ** 2).mean(dim=(1, 2, 3))
@@ -306,6 +306,8 @@ def main(args):
         "num_images": len(dataset),
         "model": args.model,
         "adapt_model": args.adapt_model,
+        "prediction_type": args.prediction_type,
+        "use_cfg": args.use_cfg,
         "resolution": args.resolution,
         "label_mode": args.label_mode,
         "label_json": args.label_json,
@@ -351,6 +353,8 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", type=str, default="./diagnostics/endpoint_disagreement")
     parser.add_argument("--model", type=str, default="SiT-B/2")
     parser.add_argument("--adapt-model", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--prediction-type", type=str, default="velocity", choices=["velocity", "endpoint"])
+    parser.add_argument("--use-cfg", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--ckpt-key", type=str, default="ema", choices=["ema", "model", "model_tgt"])
     parser.add_argument("--resolution", type=int, default=256)
     parser.add_argument("--num-classes", type=int, default=1000)

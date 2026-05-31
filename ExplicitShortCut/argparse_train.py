@@ -25,7 +25,7 @@ def parse_args(input_args=None):
     parser.add_argument("--mixed-precision", type=str, default="fp16", choices=["no", "fp16", "bf16"])
 
     # model
-    parser.add_argument("--model-name", type=str, default="esc", choices=["esc", "meanflow", "scm", "scd", "imm"])
+    parser.add_argument("--model-name", type=str, default="esc", choices=["esc", "meanflow", "euler_meanflow", "scm", "scd", "imm"])
 
     # optimization
     parser.add_argument("--optimizer", type=str, default="adam", choices=["adam", "adamw"])
@@ -63,6 +63,16 @@ def parse_args(input_args=None):
     parser.add_argument("--cfg-kappa", type=float, default=0.0, help="CFG kappa param for mixing")
     parser.add_argument("--cfg-min-t", type=float, default=0.0, help="Minum time for cfg trigger")
     parser.add_argument("--cfg-max-t", type=float, default=1.0, help="Maxium time for cfg trigger")
+
+    # Euler MeanFlow specific parameters
+    parser.add_argument("--prediction-type", type=str, default="velocity", choices=["velocity", "endpoint"],
+                        help="Interpret the model output as shortcut velocity or endpoint-like latent")
+    parser.add_argument("--loss-time-weight", type=str, default="none", choices=["none", "endpoint"],
+                        help="Optional t^2 weighting for the velocity loss")
+    parser.add_argument("--euler-dt", type=float, default=0.01,
+                        help="Finite-difference step for JVP-free Euler MeanFlow")
+    parser.add_argument("--endpoint-eps", type=float, default=1e-5,
+                        help="Numerical epsilon for endpoint parameterization")
 
     # SCM specific parameters
     parser.add_argument("--variational-adaptive-weight", action=argparse.BooleanOptionalAction, default=False)

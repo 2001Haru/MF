@@ -59,7 +59,7 @@ def main(args):
     model = SiT_models_ckpt[args.model](
         input_size=latent_size,
         num_classes=args.num_classes,
-        use_cfg = True,
+        use_cfg=args.use_cfg,
         **block_kwargs,
     ).to(device)
     
@@ -80,7 +80,8 @@ def main(args):
     model_string_name = args.model.replace("/", "-")
     ckpt_string_name = os.path.basename(args.ckpt).replace(".pt", "") if args.ckpt else "pretrained"
     exp_name = os.path.basename(os.path.dirname(os.path.dirname(args.ckpt)))
-    folder_name = f"{exp_name}-{model_string_name}-{ckpt_string_name}-size-{args.resolution}-" \
+    prediction_suffix = "" if args.prediction_type == "velocity" else "-endpoint"
+    folder_name = f"{exp_name}{prediction_suffix}-{model_string_name}-{ckpt_string_name}-size-{args.resolution}-" \
                   f"cfg-{args.cfg_scale}-steps-{args.num_steps}-seed-{args.global_seed}"
     eval_fid_dir = f"{args.sample_dir}/{folder_name}"
     metrics_file = os.path.join(eval_fid_dir, "metrics.json")
@@ -131,7 +132,8 @@ def main(args):
                 y=y,
                 scheduler=flow_scheduler,
                 cfg_scale=args.cfg_scale,
-                num_steps=args.num_steps
+                num_steps=args.num_steps,
+                prediction_type=args.prediction_type,
             ).to(torch.float32)
             latents_scale = torch.tensor(
                 [0.18125, 0.18125, 0.18125, 0.18125]
@@ -220,6 +222,9 @@ if __name__ == "__main__":
     parser.add_argument("--num-fid-samples", type=int, default=50_000)
     parser.add_argument("--num-steps", type=int, default=1, help="Number of sampling steps")
     parser.add_argument("--cfg-scale", type=float, default=1.0)
+    parser.add_argument("--prediction-type", type=str, default="velocity", choices=["velocity", "endpoint"])
+    parser.add_argument("--use-cfg", default=True, action=argparse.BooleanOptionalAction,
+                        help="Build the class embedding with an unconditional CFG token")
     parser.add_argument("--path-type", type=str, default='linear', choices=['linear', 'cosine'])
     
     # Evaluation metrics

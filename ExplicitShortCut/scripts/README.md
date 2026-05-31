@@ -130,3 +130,32 @@ accelerate launch --multi_gpu \
     --no-class-consist \
     --no-debug
 ```
+
+## Euler MeanFlow Phase 1 Ablation
+
+The JVP-free Euler MeanFlow experiments are additive and do not change the
+official ESC training path. Run all four groups with the same data, seed, batch
+size, and step budget:
+
+```bash
+DATA_DIR=/linxi/dataset/imagenet256_sd_ema_lmdb/train \
+MAX_TRAIN_STEPS=20000 \
+bash scripts/run_euler_phase1.sh bridge
+
+DATA_DIR=/linxi/dataset/imagenet256_sd_ema_lmdb/train \
+MAX_TRAIN_STEPS=20000 \
+bash scripts/run_euler_phase1.sh euler-u
+
+DATA_DIR=/linxi/dataset/imagenet256_sd_ema_lmdb/train \
+MAX_TRAIN_STEPS=20000 \
+bash scripts/run_euler_phase1.sh euler-u-weighted
+
+DATA_DIR=/linxi/dataset/imagenet256_sd_ema_lmdb/train \
+MAX_TRAIN_STEPS=20000 \
+bash scripts/run_euler_phase1.sh euler-endpoint
+```
+
+The groups compare the original JVP MeanFlow bridge, EulerMF velocity
+prediction, endpoint-equivalent `t^2` velocity weighting, and direct
+endpoint-like prediction. The default script uses class labels without CFG
+dropout or plug-in targets. Set `MULTI_GPU=0` for a single-GPU smoke test.

@@ -3,7 +3,15 @@ from utils import append_dims
 from utils.solver import ddim_solver_condv, ddim_solver_condx0
 
 @torch.no_grad()
-def cfg_sampler(model, latents, y=None, cfg_scale=1.0, num_steps=1, scheduler=None):
+def cfg_sampler(
+    model,
+    latents,
+    y=None,
+    cfg_scale=1.0,
+    num_steps=1,
+    scheduler=None,
+    prediction_type="velocity",
+):
     """
     MeanFlow sampler supporting both single-step and multi-step generation
     
@@ -11,6 +19,9 @@ def cfg_sampler(model, latents, y=None, cfg_scale=1.0, num_steps=1, scheduler=No
     For single-step: z_0 = z_1 - u(z_1, 0, 1)
     For multi-step: iteratively apply the Eq.(12) with intermediate steps
     """
+    if prediction_type not in {"velocity", "endpoint"}:
+        raise ValueError(f"Unknown prediction type: {prediction_type}")
+
     batch_size = latents.shape[0]
     device = latents.device
     sigma_data = scheduler.sigma_0
@@ -35,14 +46,21 @@ def cfg_sampler(model, latents, y=None, cfg_scale=1.0, num_steps=1, scheduler=No
             t_combined = torch.cat([t, t], dim=0)
             y_combined = torch.cat([y, null_y], dim=0)
             
-            u_combined = model(z_combined * c_in, r_combined, t_combined, y=y_combined) * c_out
-            u_cond, u_uncond = u_combined.chunk(2, dim=0)
+            prediction_combined = model(z_combined * c_in, r_combined, t_combined, y=y_combined)
+            if prediction_type == "velocity":
+                prediction_combined = prediction_combined * c_out
+            prediction_cond, prediction_uncond = prediction_combined.chunk(2, dim=0)
             
-            u = u_uncond + cfg_scale * (u_cond - u_uncond)
+            prediction = prediction_uncond + cfg_scale * (prediction_cond - prediction_uncond)
         else:
-            u = model(latents * c_in, r, t, y=y) * c_out
+            prediction = model(latents * c_in, r, t, y=y)
+            if prediction_type == "velocity":
+                prediction = prediction * c_out
         
-        x0 = ddim_solver_condv(latents, u, t, r, scheduler.alpha_bar, scheduler.beta_bar)
+        if prediction_type == "velocity":
+            x0 = ddim_solver_condv(latents, prediction, t, r, scheduler.alpha_bar, scheduler.beta_bar)
+        else:
+            x0 = ddim_solver_condx0(latents, prediction, t, r, scheduler.alpha_hat, scheduler.beta_hat)
         
     else:
         z = latents
@@ -63,16 +81,23 @@ def cfg_sampler(model, latents, y=None, cfg_scale=1.0, num_steps=1, scheduler=No
                 t_combined = torch.cat([t, t], dim=0)
                 y_combined = torch.cat([y, null_y], dim=0)
                 
-                u_combined = model(z_combined * c_in, r_combined, t_combined, y=y_combined) * c_out
-                u_cond, u_uncond = u_combined.chunk(2, dim=0)
+                prediction_combined = model(z_combined * c_in, r_combined, t_combined, y=y_combined)
+                if prediction_type == "velocity":
+                    prediction_combined = prediction_combined * c_out
+                prediction_cond, prediction_uncond = prediction_combined.chunk(2, dim=0)
                 
                 # Apply CFG
-                u = u_uncond + cfg_scale * (u_cond - u_uncond)
+                prediction = prediction_uncond + cfg_scale * (prediction_cond - prediction_uncond)
             else:
-                u = model(z * c_in, r, t, y=y) * c_out
+                prediction = model(z * c_in, r, t, y=y)
+                if prediction_type == "velocity":
+                    prediction = prediction * c_out
             
-            # Update z: z_r = z_t - (t-r)*u(z_t, r, t)
-            z = ddim_solver_condv(z, u, t, r, scheduler.alpha_bar, scheduler.beta_bar)
+            if prediction_type == "velocity":
+                # Update z: z_r = z_t - (t-r)*u(z_t, r, t)
+                z = ddim_solver_condv(z, prediction, t, r, scheduler.alpha_bar, scheduler.beta_bar)
+            else:
+                z = ddim_solver_condx0(z, prediction, t, r, scheduler.alpha_hat, scheduler.beta_hat)
         
         x0 = z
     

@@ -4,6 +4,7 @@ from loss.scm_cos_loss import SCMCosineLoss
 from loss.scm_linear_loss import SCMLinearLoss
 from loss.scd_loss import SCDLoss
 from loss.imm_loss import IMMLoss
+from loss.euler_meanflow_loss import EulerMeanFlowLoss
 
 def create_model(args):
     if args.model_name == "esc":
@@ -42,6 +43,21 @@ def create_model(args):
             cfg_kappa=args.cfg_kappa,
             cfg_min_t=args.cfg_min_t,
             cfg_max_t=args.cfg_max_t,
+        )
+    elif args.model_name == "euler_meanflow":
+        loss_fn = EulerMeanFlowLoss(
+            path_type=args.path_type,
+            loss_type=args.loss_type,
+            time_sampler=args.time_sampler,
+            time_mu=args.time_mu,
+            time_sigma=args.time_sigma,
+            ratio_r_not_equal_t=args.ratio_r_not_equal_t,
+            adaptive_p=args.adaptive_p,
+            label_dropout_prob=args.cfg_prob,
+            prediction_type=args.prediction_type,
+            loss_time_weight=args.loss_time_weight,
+            euler_dt=args.euler_dt,
+            endpoint_eps=args.endpoint_eps,
         )
     
     elif args.model_name == "scm" and args.path_type == "linear":

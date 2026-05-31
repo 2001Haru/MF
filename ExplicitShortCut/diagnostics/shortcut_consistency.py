@@ -19,6 +19,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from utils.prediction import predict_velocity
+
 
 def center_crop_arr(pil_image, image_size):
     while min(*pil_image.size) >= 2 * image_size:
@@ -166,7 +168,7 @@ def load_sit_model(args, device):
     model = SiT_models[args.model](
         input_size=latent_size,
         num_classes=args.num_classes,
-        use_cfg=True,
+        use_cfg=args.use_cfg,
         **block_kwargs,
     ).to(device)
 
@@ -298,7 +300,15 @@ def main(args):
             for frac in endpoint_r_fractions:
                 r_value_diag = t_value * frac
                 r_diag = make_time(batch_size, r_value_diag, device)
-                u_diag = model(x_t_diag, r_diag, t_diag, y=y)
+                u_diag = predict_velocity(
+                    model,
+                    x_t_diag,
+                    r_diag,
+                    t_diag,
+                    y=y,
+                    prediction_type=args.prediction_type,
+                    eps=args.eps,
+                )
                 x0_hat = x_t_diag - t_diag.view(-1, 1, 1, 1) * u_diag
                 endpoint_preds.append(x0_hat)
             endpoint_preds = torch.stack(endpoint_preds, dim=0)
@@ -318,13 +328,25 @@ def main(args):
             x_s_true = (1.0 - s_value) * x_data + s_value * noise
             x_r_true = (1.0 - r_value) * x_data + r_value * noise
 
-            u_tr = model(x_t, r, t, y=y)
+            u_tr = predict_velocity(
+                model, x_t, r, t, y=y, prediction_type=args.prediction_type, eps=args.eps
+            )
             x_r_one = x_t + (r_value - t_value) * u_tr
 
-            u_ts = model(x_t, s, t, y=y)
+            u_ts = predict_velocity(
+                model, x_t, s, t, y=y, prediction_type=args.prediction_type, eps=args.eps
+            )
             x_s_pred = x_t + (s_value - t_value) * u_ts
 
-            u_sr_pred_path = model(x_s_pred, r, s, y=y)
+            u_sr_pred_path = predict_velocity(
+                model,
+                x_s_pred,
+                r,
+                s,
+                y=y,
+                prediction_type=args.prediction_type,
+                eps=args.eps,
+            )
             x_r_two = x_s_pred + (r_value - s_value) * u_sr_pred_path
 
             gap = mse_per_sample(x_r_one, x_r_two)
@@ -348,7 +370,15 @@ def main(args):
             fit_ts = mse_per_sample(u_ts, u_cond_ts)
             # Target-fit is measured on the true path state x_s, not the
             # model-predicted x_s used in the semigroup two-step path.
-            u_sr_true_path = model(x_s_true, r, s, y=y)
+            u_sr_true_path = predict_velocity(
+                model,
+                x_s_true,
+                r,
+                s,
+                y=y,
+                prediction_type=args.prediction_type,
+                eps=args.eps,
+            )
             fit_sr = mse_per_sample(u_sr_true_path, u_cond_sr)
 
             triple_key = f"{t_value}:{s_value}:{r_value}"
@@ -418,6 +448,8 @@ def main(args):
         "num_images": len(dataset),
         "model": args.model,
         "adapt_model": args.adapt_model,
+        "prediction_type": args.prediction_type,
+        "use_cfg": args.use_cfg,
         "resolution": args.resolution,
         "label_mode": args.label_mode,
         "label_json": args.label_json,
@@ -493,6 +525,8 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", type=str, default="./diagnostics/shortcut_consistency")
     parser.add_argument("--model", type=str, default="SiT-B/2")
     parser.add_argument("--adapt-model", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--prediction-type", type=str, default="velocity", choices=["velocity", "endpoint"])
+    parser.add_argument("--use-cfg", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--ckpt-key", type=str, default="ema", choices=["ema", "model", "model_tgt"])
     parser.add_argument("--resolution", type=int, default=256)
     parser.add_argument("--num-classes", type=int, default=1000)
